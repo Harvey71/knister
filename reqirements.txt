@@ -1,6 +1,4 @@
 numpy
 tensorflow
 keras
-keras-rl
-gym
 pytest

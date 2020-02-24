@@ -1,69 +1,88 @@
+import warnings
+warnings.filterwarnings('ignore')
+
 import numpy as np
 import unittest
-from gym.envs.toy_text import discrete
+import random
+
 import sys
 from six import StringIO
 
-class Env(discrete.DiscreteEnv):
+class Env:
 
     metadata = {'render.modes': ['ansi', 'human']}
 
     def __init__(self):
         self.edge_length = 5
         self.reset()
+        self.action_space = 25
+        self.observation_space = self.state_one_hot.shape
+        self.reward_range = (0, 100)
 
     def step(self, action):
         # action: position of empty cell, to fill with rolled result
-        self.state[action] = self.state[-1]
-        done = not np.any(self.state == 0)
-        reward = self.get_score()
-        self.roll_dices()
-        return self.state, reward, done
+        if self.state[action] == 0:
+            val = self.state[25]
+            self.state[action] = val
+            self.state_one_hot[action][0] = 0
+            self.state_one_hot[action][val] = 1
+            self.roll_dices()
+            done = not np.any(self.state == 0)
+            reward = 0 if not done else self.get_score()
+        else:
+            # rule violation, sudden death
+            reward = -1000
+            done = True
 
-    def reset(self):
-        # state:
-        #   first edge_lentgh^2 values = noted cell values, 0 for empty cell
-        #   last value: sum of current dice results
-        self.state = np.asarray([0] * (self.edge_length ** 2 + 1), dtype=np.int8)
-        self.roll_dices()
-        return self.state
+        info = {}
+        return self.state_one_hot.copy(), reward, done, info
 
+    def reset(self, start_dice=None):
+        self.state = np.zeros((26,), dtype=np.ubyte)
+        self.state_one_hot = np.zeros((26, 12), dtype=np.ubyte)
+        for i in range(25):
+            self.state_one_hot[i, 0] = 1
+        self.roll_dices()
+        return self.state_one_hot.copy()
 
     def render(self, mode='human'):
+        out = []
         border = '+--' * self.edge_length + '+\n'
         outfile = StringIO() if mode == 'ansi' else sys.stdout
-        matrix = np.reshape(self.state[:-1], (self.edge_length, self.edge_length))
-        out = ['\n']
+        matrix = np.reshape(self.state[:-1], (5, 5))
         for row in matrix:
             out.append(border)
-            line = '|'.join(['{0:>2}'.format(col) if col else '  ' for col in row])
+            line = '|'.join(['{0:>2}'.format(col + 1) if col else '  ' for col in row])
             line = '|' + line + '|\n'
             out.append(line)
         out.append(border)
+        out.append(f'next dice: {self.d1}+{self.d2}={self.state[25] + 1}\n')
+        out.append('\n\n')
         outfile.writelines(out)
 
-
-
     def roll_dices(self):
+        # remove old one hot dice result
+        self.state_one_hot[25, self.state[25]] = 0
         # roll two D6 and add values
-        result = np.sum(np.random.randint(1, 6, 2, dtype=np.int8))
-        self.state[-1] = result
+        self.d1 = random.randint(1, 6)
+        self.d2 = random.randint(1, 6)
+        result = self.d1 + self.d2
+        self.state[25] = result - 1
+        # set new one hot dice result
+        self.state_one_hot[25, result - 1] = 1
 
     def get_score_for_row(self,row):
-        # filter for used cells
-        row = np.extract(row > 0, row)
         # sort
         row = np.sort(row)
-        if len(row) == self.edge_length:
-            # check for street:
-            if np.count_nonzero(np.ediff1d(row) == 1) == self.edge_length - 1:
-                # street
-                if np.any(row == 7):
-                    # street with a 7
-                    return 8
-                else:
-                    # street without a 7
-                    return 12
+        # check for street:
+        if np.count_nonzero(np.ediff1d(row) == 1) == 4:
+            # street
+            if np.any(row == 7):
+                # street with a 7
+                return 8
+            else:
+                # street without a 7
+                return 12
         # find n_lets
         n_lets = np.unique(row, return_counts=True)[1]
         # eliminate singles
@@ -110,6 +129,24 @@ class Env(discrete.DiscreteEnv):
     def get_actions(self):
         return np.argwhere(self.state[:-1])
 
+    def get_hash(self):
+        s = ''
+        for i in range(26):
+            if i == 25:
+                s += '|'
+            s += '%.2d' % self.state[i]
+        return s
+
+    def filter_probs(self, probs):
+        filter = self.state[:-1] > 0
+        probs[filter] = 0
+        sum = np.sum(probs)
+        if sum > 0:
+            probs = probs / sum
+        else:
+            probs = np.full(25, 1 / 25)
+        return probs
+
 # unit tests
 class TestGetScoreForRow(unittest.TestCase):
 
@@ -117,12 +154,10 @@ class TestGetScoreForRow(unittest.TestCase):
         self.env = Env()
 
     def assertScore(self, row, score):
-        self.assertEqual(self.env.get_score_for_row(np.asarray(row, dtype=np.int8)), score)
+        self.assertEqual(self.env.get_score_for_row(np.asarray(row, dtype=np.ubyte)), score)
 
     def test_blank(self):
-        self.assertScore([0, 0, 0, 0, 0], 0)
-        self.assertScore([0, 0, 0, 0, 2], 0)
-        self.assertScore([2, 3, 4, 5, 0], 0)
+        self.assertScore([12, 10, 11, 2, 3], 0)
         self.assertScore([2, 3, 4, 6, 7], 0)
 
     def test_street(self):
@@ -130,7 +165,7 @@ class TestGetScoreForRow(unittest.TestCase):
         self.assertScore([5, 4, 8, 7, 6], 8)
 
     def test_pair(self):
-        self.assertScore([0, 2, 0, 2, 0], 1)
+        self.assertScore([12, 2, 11, 2, 10], 1)
         self.assertScore([2, 3, 4, 5, 2], 1)
 
     def test_triplet(self):
@@ -155,25 +190,8 @@ class TestGetScore(unittest.TestCase):
         self.env = Env()
 
     def assertScore(self, matrix, score):
-        self.env.state = np.asarray(matrix + [0], dtype=np.int8)
+        self.env.state = np.asarray(matrix + [0], dtype=np.ubyte)
         self.assertEqual(self.env.get_score(), score)
-
-    def test_blank(self):
-        self.assertScore(
-            [2, 0, 0, 0, 3,
-             0, 0, 0, 0, 0,
-             3, 4, 6, 7, 8,
-             0, 0, 0, 0, 0,
-             5, 0, 0, 0, 4,], 0)
-
-    def test_diags(self):
-        # quality street plus full house
-        self.assertScore(
-            [2, 0, 0, 0, 7,
-             0, 3, 0, 7, 0,
-             0, 0, 4, 0, 0,
-             0, 4, 0, 5, 0,
-             4, 0, 0, 0, 6,], 12 * 2 + 8 * 2)
 
     def test_real_life_example(self):
         self.assertScore(
@@ -186,6 +204,17 @@ class TestGetScore(unittest.TestCase):
             1 + 0 + 10 + 1 + 1 + # rows
             12 * 2 + 8 * 2) # diags
 
+    def test_real_life_example2(self):
+        self.assertScore(
+            [4, 4, 4, 5, 2,
+             5, 10, 4, 10, 6,
+             7, 5, 10, 3, 4,
+             5, 8, 11, 4, 3,
+             10, 10, 6, 8, 7,],
+            1 + 1 + 1 + 0 + 0 + # cols
+            3 + 1 + 0 + 0 + 1 + # rows
+            3 * 2 + 3 * 2) # diags
+
 class TestStep(unittest.TestCase):
 
     def setUp(self):
@@ -195,26 +224,29 @@ class TestStep(unittest.TestCase):
     def test_step_1(self):
         rolled = self.env.state[-1]
         self.sum += rolled
-        state, reward, done = self.env.step(12)
-        self.assertEqual(state[12], rolled)
+        state_one_hot, reward, done, _ = self.env.step(12)
+        state = self.env.state
+        self.assertEqual(np.sum(state_one_hot[:-1]), 25)
         self.assertEqual(np.sum(state[:-1]), self.sum)
 
     def test_step_2(self):
         rolled = self.env.state[-1]
         self.sum += rolled
-        state, reward, done = self.env.step(0)
-        self.assertEqual(state[0], rolled)
+        state_one_hot, reward, done, _ = self.env.step(0)
+        state = self.env.state
+        self.assertEqual(np.sum(state_one_hot[:-1]), 25)
         self.assertEqual(np.sum(state[:-1]), self.sum)
 
     def test_step_3(self):
-        self.env.reset()
-        self.assertEqual(self.env.state[0], 0)
-        self.assertEqual(self.env.state[12], 0)
+        state_one_hot = self.env.reset()
+        state = self.env.state
+        self.assertEqual(np.sum(state_one_hot[:-1]), 25)
+        self.assertEqual(np.sum(state[:-1]), 0)
 
     def test_done(self):
         self.env.reset()
         for action in range(25):
-            state, reward, done = self.env.step(action)
+            state, reward, done, _ = self.env.step(action)
             self.assertEqual(done, action == 24)
 
 class TestGetActions(unittest.TestCase):
