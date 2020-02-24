@@ -8,11 +8,11 @@ from dqn import *
 
 class DqnAgent:
     def __init__(self, env):
-        # DQN Env Variables
+        # environment
         self.env = env
         self.observations = self.env.observation_space
-        self.actions = 25
-        # DQN Agent Variables
+        self.actions = self.env.action_space
+        # agent properties
         self.replay_buffer_size = int(1e6)
         self.train_start = int(1e5)
         self.memory = collections.deque(maxlen=self.replay_buffer_size)
@@ -20,7 +20,7 @@ class DqnAgent:
         self.epsilon = 1.0
         self.epsilon_min = 0.02
         self.epsilon_decay = 0.99999
-        # DQN Network Variables
+        # nq network properties
         self.state_shape = self.observations
         self.learning_rate = 1e-4
         self.model = DQN(self.state_shape, self.actions, self.learning_rate)
@@ -30,9 +30,11 @@ class DqnAgent:
 
     def get_action(self, state):
         if np.random.rand() <= self.epsilon:
+            # select random move from possible moves
             valid_moves = np.where(state[:,0] == 1)[0]
             return np.random.choice(valid_moves)
         else:
+            # select valid move with best predicted q-value
             q_values = self.model.predict(np.reshape(state, (1,) + state.shape))[0]
             for i in range(25):
                 if state[i, 0] == 0:
@@ -40,42 +42,42 @@ class DqnAgent:
             action = np.argmax(q_values)
             return action
 
-    def train(self, num_episodes):
+    def train(self, target_avg_reward):
         best_total_reward = 0.0
+        avg_reward = 0.0
         reward_sum = 0
-        for episode in range(num_episodes):
+        episode = 0
+        while avg_reward < target_avg_reward:
+            # play one episode and learn
+            episode += 1
             total_reward = 0.0
             state = self.env.reset()
             episode_buffer = []
             while True:
                 action = self.get_action(state)
                 next_state, reward, done, _ = self.env.step(action)
-                # self.remember(state, action, reward, next_state, done)
                 episode_buffer.append((state, action, reward, next_state, done))
                 self.replay()
                 total_reward += reward
                 state = next_state
-                if episode == 0:
-                    best_total_reward = total_reward
                 if done:
-                    # remember episode
                     reward = total_reward
                     reward_sum += total_reward
+                    if total_reward > best_total_reward:
+                        best_total_reward = total_reward
+                    # remember episode
                     for step in reversed(episode_buffer):
                         (state, action, _, next_state, done) = step
                         self.remember(state, action, reward, next_state, done)
                         reward *= self.gamma # discount reward
                     if episode % 1000 == 0:
+                        # update target model
                         self.target_model.update_model(self.model)
-                        print("Episode: ", episode+1,
-                        " Total Reward: ", total_reward,
-                        " Epsilon: ", round(self.epsilon,3),
-                        " Avg Reward: ", reward_sum / 1000)
+                        avg_reward = reward_sum / 1000
                         reward_sum = 0
+                        print(f'Episode #{episode}, avg score {avg_reward}, best score {best_total_reward}, epsilon {self.epsilon}')
+                        # save progress in case of crash or user interrupt
                         self.model.save_model("knister_dqn.h5")
-                    if total_reward > best_total_reward:
-                        best_total_reward = total_reward
-                        print("NEW BEST REWARD: ", best_total_reward)
                     break
 
     def remember(self, state, action, reward, next_state, done):
@@ -106,32 +108,31 @@ class DqnAgent:
 
         self.model.train(states, q_values)
 
-    def play(self, num_episodes, render=True):
-        self.model.load_model("knister_dqn.h5")
+    def play(self):
+        self.model.load_model('knister_dqn.h5')
         self.epsilon = -1.0 # do not use random moves
-        for episode in range(num_episodes):
-            state = self.env.reset()
-            if render:
-                self.env.render()
-                input('press enter')
-            while True:
-                action = self.get_action(state)
-                next_state, reward, done, _ = self.env.step(action)
-                state = next_state
-                if render:
-                    self.env.render()
-                    input('press enter')
-                if done:
-                    print(f'Score: {self.env.get_score()}')
-                    break
+        state = self.env.reset()
+        self.env.render()
+        input('press enter')
+        while True:
+            action = self.get_action(state)
+            next_state, reward, done, _ = self.env.step(action)
+            state = next_state
+            self.env.render()
+            input('press enter')
+            if done:
+                print(f'Score: {self.env.get_score()}')
+                break
 
-if __name__ == "__main__":
+if __name__ == '__main__':
+    mode = None
+    if len(sys.argv) > 1:
+        mode = sys.argv[1]
     env = Env()
     agent = DqnAgent(env)
-    import os
-    # if os.path.exists("knister_dqn.h5"):
-    #     agent.model.load_model("knister_dqn.h5")
-    #     agent.target_model.load_model("knister_dqn.h5")
-    #agent.train(num_episodes=int(1e12))
-    input("Play?")
-    agent.play(num_episodes=1, render=True)
+    if mode == 'train':
+        agent.train(50.0)
+    elif mode == 'play':
+        agent.play()
+    else:
+        print('python agent.py (train|play)')
